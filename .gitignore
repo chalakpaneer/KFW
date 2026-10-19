@@ -1,0 +1,27 @@
+# Build trees
+kfw-build/
+build/
+dist/
+
+# Vendored binaries (not for the repo — download per README)
+third_party/
+
+# Compiled artifacts
+*.exe
+*.dll
+*.obj
+*.o
+*.a
+*.lib
+*.rcc/
+*.autosave
+*.qmlcache/
+
+# Editor / OS junk
+.vs/
+.vscode/
+.idea/
+CMakeLists.txt.user
+.DS_Store
+Thumbs.db
+desktop.ini

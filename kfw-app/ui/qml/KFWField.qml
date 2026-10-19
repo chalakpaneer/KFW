@@ -9,7 +9,7 @@ Column {
 
     property string labelText: ""
     property string placeholder: ""
-    property string text: ""
+    property alias  text: focusField.text
     property int     longest: 0
     property bool    isError: false
     property string  hintMessage: ""
@@ -46,7 +46,6 @@ Column {
             font.pixelSize: 13
             font.family: theme.fontFamily
             color: theme.textHi
-            text: root.text
             cursorVisible: activeFocus
             clip: true
             selectByMouse: true

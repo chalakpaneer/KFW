@@ -652,6 +652,11 @@ Window {
         }
 
         onAboutToHide: newCaseDialog.submitted = false
+        onOpened: {
+            newCaseDialog.submitted = false
+            caseTitleField.text = ""
+            examinerField.text = Qt.binding(function() { return kfwShell.examinerName })
+        }
     }
 
     // -- About dialog -------------------------------------------------------

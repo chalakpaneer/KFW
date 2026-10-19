@@ -50,6 +50,7 @@ Window {
         id: dashboardComponent
         KFWDashboard {
             onNewCaseRequested: newCaseDialog.open()
+            onOpenCaseRequested: (cid) => kfwShell.openCase(cid)
         }
     }
 

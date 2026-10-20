@@ -10,6 +10,8 @@
  *****************************************************************************/
 
 #include "kfw_evidence.h"
+#include "../util/kfw_util.h"
+#include <sys/stat.h>
 
 #include <errno.h>
 #include <stdio.h>
@@ -172,14 +174,17 @@ int kfw_evidence_import(const kfw_evidence_ctx_t *ctx,
                                    out_ev->stored_path,
                                    out_ev->verify_status);
 
-    /* Append import audit event with provenance detail */
+    /* Append import audit event with provenance detail.  Paths are escaped:
+     * a Windows path such as C:\\Users\\x would otherwise produce invalid JSON. */
     {
-        char detail[512];
+        char esc_src[4200], esc_dst[4200], detail[8800];
+        kfw_json_escape(src_path, esc_src, sizeof(esc_src));
+        kfw_json_escape(dest,     esc_dst, sizeof(esc_dst));
         snprintf(detail, sizeof(detail),
                  "{\"src\":\"%s\",\"dest\":\"%s\","
                  "\"src_sha256\":\"%s\",\"dest_sha256\":\"%s\","
                  "\"size\":%lld,\"verify\":\"%s\"}",
-                 src_path, dest,
+                 esc_src, esc_dst,
                  result.src_sha256, result.dest_sha256,
                  (long long)result.size_bytes,
                  kfw_verify_status_str(result.status));
@@ -188,6 +193,60 @@ int kfw_evidence_import(const kfw_evidence_ctx_t *ctx,
                              "evidence.import",
                              "evidence", out_ev->evidence_id, detail);
     }
+
+    /* Source file's claimed modification time (a claim, not a fact). */
+    {
+        struct stat sst;
+        out_ev->fs_modified_utc =
+            (stat(src_path, &sst) == 0) ? (int64_t)sst.st_mtime : 0;
+    }
+
+    /* Duplicate detection: same SHA-256 already present?  Prefer a match in
+     * this case; remember any match.  The import is kept either way (the
+     * examiner decides), but the link is stored and audited. */
+    if (rc == 0 && out_ev->sha256[0])
+    {
+        kfw_db_evidence_t *same = NULL;
+        int n_same = 0;
+        if (kfw_db_evidence_find_by_sha256(ctx->db, out_ev->sha256,
+                                           &same, &n_same) == 0)
+        {
+            const kfw_db_evidence_t *pick = NULL;
+            int same_case = 0;
+            for (int i = 0; i < n_same; ++i)
+            {
+                if (strcmp(same[i].evidence_id, out_ev->evidence_id) == 0)
+                    continue;
+                if (strcmp(same[i].case_id, case_id) == 0)
+                {
+                    pick = &same[i];
+                    same_case = 1;
+                    break;
+                }
+                if (!pick)
+                    pick = &same[i];
+            }
+            if (pick)
+            {
+                snprintf(out_ev->duplicate_of, sizeof(out_ev->duplicate_of),
+                         "%s", pick->evidence_id);
+                char detail[256];
+                snprintf(detail, sizeof(detail),
+                         "{\"duplicate_of\":\"%s\",\"same_case\":%s,"
+                         "\"sha256\":\"%s\"}",
+                         pick->evidence_id, same_case ? "true" : "false",
+                         out_ev->sha256);
+                kfw_db_audit_append(ctx->db,
+                                     ctx->examiner ? ctx->examiner : "system",
+                                     "evidence.duplicate", "evidence",
+                                     out_ev->evidence_id, detail);
+            }
+            free(same);
+        }
+    }
+    kfw_db_evidence_set_import_extras(ctx->db, out_ev->evidence_id,
+                                      out_ev->fs_modified_utc,
+                                      out_ev->duplicate_of);
 
     return rc;   /* 0 = ok, KFW_ERR_DIGEST_MISMATCH if copy was bad */
 }
@@ -221,12 +280,13 @@ int kfw_evidence_reverify(const kfw_evidence_ctx_t *ctx,
                                 kfw_verify_status_str(status));
 
     {
-        char detail[768];
+        char esc_stored[4200], detail[4800];
+        kfw_json_escape(ev.stored_path, esc_stored, sizeof(esc_stored));
         snprintf(detail, sizeof(detail),
                  "{\"evidence_id\":\"%s\",\"stored\":\"%s\","
                  "\"reference_sha256\":\"%s\",\"computed_sha256\":\"%s\","
                  "\"result\":\"%s\"}",
-                 evidence_id, ev.stored_path,
+                 evidence_id, esc_stored,
                  ev.sha256,
                  status == KFW_VERIFY_NOT_CHECKED ? "" : actual_hex,
                  kfw_verify_status_str(status));

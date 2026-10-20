@@ -158,6 +158,34 @@ void  kfw_player_seek_ms(kfw_player_t *p, int64_t ms);
 void  kfw_player_set_rate(kfw_player_t *p, float rate);
 float kfw_player_rate(kfw_player_t *p);
 
+/** One selectable audio or subtitle track as reported by the engine. */
+typedef struct kfw_track_desc
+{
+    int  id;          /**< engine track id; -1 = "Disable" */
+    char name[128];   /**< UTF-8 label, e.g. "Track 2 - [English]" */
+} kfw_track_desc_t;
+
+/** Fill \p out with up to \p max audio tracks; \return number written.
+ *  Only populated once playback has started (the engine discovers elementary
+ *  streams lazily). */
+int kfw_player_audio_tracks(kfw_player_t *p, kfw_track_desc_t *out, int max);
+int kfw_player_audio_track(kfw_player_t *p);              /* current id */
+int kfw_player_set_audio_track(kfw_player_t *p, int id);  /* 0 on success */
+
+int kfw_player_spu_tracks(kfw_player_t *p, kfw_track_desc_t *out, int max);
+int kfw_player_spu_track(kfw_player_t *p);
+int kfw_player_set_spu_track(kfw_player_t *p, int id);
+
+/** Volume in percent (0..200, 100 = unity) and mute. */
+void kfw_player_set_volume(kfw_player_t *p, int percent);
+int  kfw_player_volume(kfw_player_t *p);
+void kfw_player_set_mute(kfw_player_t *p, int mute);
+int  kfw_player_muted(kfw_player_t *p);
+
+/** Release the process-wide libVLC instances. Call once at exit, after every
+ *  player and adapter has been destroyed. */
+void kfw_media_shutdown(void);
+
 /** Live video dimensions as delivered to the frame tap (0 until started). */
 unsigned kfw_player_width(const kfw_player_t *p);
 unsigned kfw_player_height(const kfw_player_t *p);

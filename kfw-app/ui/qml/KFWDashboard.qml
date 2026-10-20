@@ -101,28 +101,28 @@ Rectangle {
                 KFWStatCard {
                     width: (parent.width - 42) / 4
                     label: "Total Cases"
-                    value: kfwCaseModel.totalCases()
+                    value: kfwCaseModel.totalCases
                     tone: theme.accent
                     icon_: "icons/folder.svg"
                 }
                 KFWStatCard {
                     width: (parent.width - 42) / 4
                     label: "Open Cases"
-                    value: kfwCaseModel.openCases()
+                    value: kfwCaseModel.openCases
                     tone: theme.ok
                     icon_: "icons/examine.svg"
                 }
                 KFWStatCard {
                     width: (parent.width - 42) / 4
                     label: "Pending Verify"
-                    value: kfwCaseModel.pendingTotal()
+                    value: kfwCaseModel.pendingTotal
                     tone: theme.warn
                     icon_: "icons/shield.svg"
                 }
                 KFWStatCard {
                     width: (parent.width - 42) / 4
                     label: "Evidence Items"
-                    value: kfwCaseModel.evidenceTotal()
+                    value: kfwCaseModel.evidenceTotal
                     tone: theme.info
                     icon_: "icons/trailer.svg"
                 }
@@ -136,7 +136,7 @@ Rectangle {
                 color: theme.warnBg
                 border.width: 1
                 border.color: Qt.alpha(theme.warn, 0.4)
-                visible: kfwCaseModel.pendingTotal() > 0
+                visible: kfwCaseModel.pendingTotal > 0
 
                 Row {
                     anchors {
@@ -166,7 +166,7 @@ Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 3
                         Text {
-                            text: kfwCaseModel.pendingTotal()
+                            text: kfwCaseModel.pendingTotal
                                   + " evidence item(s) awaiting SHA-256 verification"
                             font { pixelSize: 13; bold: true; family: theme.fontFamily }
                             color: theme.warn
@@ -197,7 +197,7 @@ Rectangle {
                     }
 
                     Text {
-                        text: kfwCaseModel.totalCases() + " total"
+                        text: kfwCaseModel.totalCases + " total"
                         font.pixelSize: 11
                         font.family: theme.fontFamily
                         color: theme.textLow

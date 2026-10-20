@@ -78,6 +78,7 @@ void KFWCaseModel::loadList(const QVariantList &rows)
 
     endResetModel();
     emit countChanged();
+    emit statsChanged();
 }
 
 void KFWCaseModel::setStatus(const QString &caseId, const QString &status)
@@ -88,6 +89,7 @@ void KFWCaseModel::setStatus(const QString &caseId, const QString &status)
     m_cases[static_cast<size_t>(row)].status = status;
     const QModelIndex idx = index(row);
     emit dataChanged(idx, idx, { StatusRole });
+    emit statsChanged();
 }
 
 int KFWCaseModel::totalCases() const

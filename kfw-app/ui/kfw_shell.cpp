@@ -25,7 +25,10 @@
 #include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QElapsedTimer>
+#include <QJsonArray>
 #include <QMutex>
+#include <QMutexLocker>
 #include <algorithm>
 #include <QQmlComponent>
 #include <QQmlContext>
@@ -44,6 +47,7 @@ extern "C" {
 #include "../evidence/kfw_evidence.h"
 #include "../integrity/kfw_integrity.h"
 #include "../reporting/kfw_report.h"
+#include "../export/kfw_package.h"
 #include "../timeline/kfw_timeline.h"
 #include "../media/kfw_media.h"
 }
@@ -51,6 +55,9 @@ extern "C" {
 // ---- Global per-process case database --------------------------------------
 
 static kfw_db_t *s_db = nullptr;
+
+/* Only one media probe may touch the engine at a time (see kfw_media.c). */
+static QMutex s_probeLock;
 
 // ---- Display helpers ---------------------------------------------------------
 
@@ -154,6 +161,15 @@ KFWShell::~KFWShell()
     }
 
     teardownLivePlayback();
+
+    /* Probe workers capture `this`; let them finish before we disappear. */
+    QElapsedTimer waited;
+    waited.start();
+    while (m_probesRunning.load() > 0 && waited.elapsed() < 15000)
+        QThread::msleep(20);
+
+    kfw_media_shutdown();
+
     if (s_db)
     {
         kfw_db_close(s_db);
@@ -395,6 +411,7 @@ void KFWShell::reloadEvidence(const QString &caseId)
             row.insert(QStringLiteral("origPath"),   QString::fromUtf8(e.orig_path));
             row.insert(QStringLiteral("provenance"), QString::fromUtf8(e.provenance));
             row.insert(QStringLiteral("verifyStatus"), QString::fromUtf8(e.verify_status));
+            row.insert(QStringLiteral("duplicateOf"),  QString::fromUtf8(e.duplicate_of));
             row.insert(QStringLiteral("verifiedText"), fmt_epoch(e.verified_utc,
                                                                   true));
             row.insert(QStringLiteral("importedText"), fmt_epoch(e.imported_utc));
@@ -454,6 +471,7 @@ void KFWShell::showDashboard()
 
 void KFWShell::openCase(const QString &caseId)
 {
+    ++m_switchGen;
     m_activeCaseId    = caseId;
     m_activeCaseTitle.clear();
     m_activeEvidenceId.clear();
@@ -486,30 +504,55 @@ void KFWShell::openCase(const QString &caseId)
 
 void KFWShell::openEvidence(const QString &caseId, const QString &evidenceId)
 {
-    openCase(caseId);
+    /* Switching between evidence items of the case that is already open must
+     * NOT rebuild the case: openCase() resets the evidence/timeline models,
+     * which destroys the very list delegate that is handling the click, and
+     * re-emits the screen change. Only swap the evidence and the player. */
+    const bool sameCase = !caseId.isEmpty() && caseId == m_activeCaseId
+                          && m_currentScreen == QStringLiteral("Workspace");
+
+    if (!sameCase)
+        openCase(caseId);
     if (evidenceId.isEmpty() || !s_db)
         return;
+    if (sameCase && evidenceId == m_activeEvidenceId && m_player != nullptr)
+        return;   /* already open and playing */
 
     kfw_db_evidence_t ev;
-    if (kfw_db_evidence_get(s_db, evidenceId.toUtf8().constData(), &ev) == 0)
-    {
-        m_activeEvidenceId         = evidenceId;
-        m_activeEvidenceName       = QString::fromUtf8(ev.orig_filename);
-        m_activeEvidenceSha        = QString::fromUtf8(ev.sha256);
-        m_activeEvidenceStatus     = QString::fromUtf8(ev.verify_status);
-        m_activeEvidenceProvenance = QString::fromUtf8(ev.provenance);
-        const QString stored = QString::fromUtf8(ev.stored_path);
-        m_activePlayerUrl = QFileInfo(stored).exists()
-            ? QUrl::fromLocalFile(stored) : QUrl();
+    if (kfw_db_evidence_get(s_db, evidenceId.toUtf8().constData(), &ev) != 0)
+        return;
 
-        emit activeEvidenceChanged();
-        probeEvidenceMedia(evidenceId);
+    if (sameCase)
+    {
+        ++m_switchGen;
+        teardownLivePlayback();
+        m_activeMediaInfo.clear();
+        emit mediaInfoChanged();
     }
+
+    m_activeEvidenceId         = evidenceId;
+    m_activeEvidenceName       = QString::fromUtf8(ev.orig_filename);
+    m_activeEvidenceSha        = QString::fromUtf8(ev.sha256);
+    m_activeEvidenceStatus     = QString::fromUtf8(ev.verify_status);
+    m_activeEvidenceProvenance = QString::fromUtf8(ev.provenance);
+    const QString stored = QString::fromUtf8(ev.stored_path);
+    m_activePlayerUrl = QFileInfo(stored).exists()
+        ? QUrl::fromLocalFile(stored) : QUrl();
+
+    emit activeEvidenceChanged();
+    probeEvidenceMedia(evidenceId);
 }
 
 // ---- Case management -----------------------------------------------------------------
 
 QString KFWShell::createCase(const QString &title, const QString &examiner)
+{
+    return createCaseEx(title, examiner, QString(), QString(), QString());
+}
+
+QString KFWShell::createCaseEx(const QString &title, const QString &examiner,
+                               const QString &caseNumber, const QString &agency,
+                               const QString &requester)
 {
     if (!s_db || title.trimmed().isEmpty())
         return {};
@@ -520,6 +563,12 @@ QString KFWShell::createCase(const QString &title, const QString &examiner)
     snprintf(c.examiner, sizeof(c.examiner), "%s",
              (examiner.isEmpty() ? m_examinerName : examiner).toUtf8().constData());
     snprintf(c.status,   sizeof(c.status),   "Open");
+    snprintf(c.case_number, sizeof(c.case_number), "%s",
+             caseNumber.trimmed().toUtf8().constData());
+    snprintf(c.agency,      sizeof(c.agency),      "%s",
+             agency.trimmed().toUtf8().constData());
+    snprintf(c.requester,   sizeof(c.requester),   "%s",
+             requester.trimmed().toUtf8().constData());
 
     if (kfw_db_case_insert(s_db, &c) != 0)
     {
@@ -533,6 +582,58 @@ QString KFWShell::createCase(const QString &title, const QString &examiner)
     emit notice(QStringLiteral("Case %1 created").arg(caseId));
     refreshAuditChain();
     return caseId;
+}
+
+QVariantMap KFWShell::caseDetails(const QString &caseId)
+{
+    QVariantMap m;
+    kfw_db_case_t c;
+    if (!s_db || kfw_db_case_get(s_db, caseId.toUtf8().constData(), &c) != 0)
+        return m;
+    auto u = [](const char *p) { return QString::fromUtf8(p); };
+    m.insert(QStringLiteral("caseId"),       u(c.case_id));
+    m.insert(QStringLiteral("title"),        u(c.title));
+    m.insert(QStringLiteral("examiner"),     u(c.examiner));
+    m.insert(QStringLiteral("status"),       u(c.status));
+    m.insert(QStringLiteral("caseNumber"),   u(c.case_number));
+    m.insert(QStringLiteral("agency"),       u(c.agency));
+    m.insert(QStringLiteral("requester"),    u(c.requester));
+    m.insert(QStringLiteral("incidentDate"), u(c.incident_date));
+    m.insert(QStringLiteral("location"),     u(c.location));
+    m.insert(QStringLiteral("description"),  u(c.description));
+    m.insert(QStringLiteral("created"),
+             QDateTime::fromSecsSinceEpoch(c.created_utc, QTimeZone::UTC)
+                 .toString(QStringLiteral("yyyy-MM-dd HH:mm 'UTC'")));
+    return m;
+}
+
+bool KFWShell::saveCaseDetails(const QString &caseId, const QVariantMap &d)
+{
+    if (!s_db)
+        return false;
+    kfw_db_case_t m;
+    memset(&m, 0, sizeof(m));
+    auto put = [&d](char *dst, size_t n, const char *key) {
+        snprintf(dst, n, "%s",
+                 d.value(QString::fromLatin1(key)).toString().trimmed().toUtf8().constData());
+    };
+    put(m.case_number,   sizeof(m.case_number),   "caseNumber");
+    put(m.agency,        sizeof(m.agency),        "agency");
+    put(m.requester,     sizeof(m.requester),     "requester");
+    put(m.incident_date, sizeof(m.incident_date), "incidentDate");
+    put(m.location,      sizeof(m.location),      "location");
+    put(m.description,   sizeof(m.description),   "description");
+
+    if (kfw_db_case_update_meta(s_db, caseId.toUtf8().constData(), &m,
+                                m_examinerName.toUtf8().constData()) != 0)
+    {
+        emit errorOccurred(QStringLiteral("Could not save the case details."));
+        return false;
+    }
+    reloadCases();
+    refreshAuditChain();
+    emit notice(QStringLiteral("Case details saved"));
+    return true;
 }
 
 void KFWShell::setCaseStatus(const QString &caseId, const QString &status)
@@ -593,6 +694,7 @@ void KFWShell::importEvidence(const QString &caseId, const QString &filePath)
         const QString evId  = QString::fromUtf8(ev.evidence_id);
         const QString sha   = QString::fromUtf8(ev.sha256);
         const QString vstus = QString::fromUtf8(ev.verify_status);
+        const QString dupOf = QString::fromUtf8(ev.duplicate_of);
 
         QMetaObject::invokeMethod(this, [=]()
         {
@@ -601,6 +703,11 @@ void KFWShell::importEvidence(const QString &caseId, const QString &filePath)
                 emit evidenceImported(evId, vstus, sha);
                 emit notice(QStringLiteral("Imported %1 ??? SHA-256 %2")
                                 .arg(evId, vstus));
+                if (!dupOf.isEmpty())
+                    emit errorOccurred(QStringLiteral(
+                        "%1 is byte-identical to %2 (same SHA-256). "
+                        "Both were kept; check you did not import the same "
+                        "footage twice.").arg(evId, dupOf));
             }
             else if (rc == KFW_ERR_DIGEST_MISMATCH)
             {
@@ -711,9 +818,12 @@ void KFWShell::probeEvidenceMedia(const QString &evidenceId)
 
     const QByteArray pathBytes = stored.toUtf8();
     const std::string evid = evidenceId.toStdString();
+    const int gen = m_switchGen;
 
+    ++m_probesRunning;
     QThread *worker = QThread::create([=]()
     {
+        QMutexLocker probeGuard(&s_probeLock);   /* one probe at a time */
         QVariantMap info;
         info.insert(QStringLiteral("available"), false);
 
@@ -753,6 +863,8 @@ void KFWShell::probeEvidenceMedia(const QString &evidenceId)
                                   : t->track_type == 0 ? QStringLiteral("Audio")
                                   : QStringLiteral("Text"));
                         tm.insert(QStringLiteral("codec"), codec_display(t));
+                        tm.insert(QStringLiteral("language"),
+                                  QString::fromUtf8(t->language ? t->language : ""));
                         tm.insert(QStringLiteral("bitrate"),
                                   (unsigned long long)t->bitrate);
                         if (t->track_type == 1)
@@ -809,7 +921,8 @@ void KFWShell::probeEvidenceMedia(const QString &evidenceId)
 
         QMetaObject::invokeMethod(this, [=, info = std::move(info)]() mutable
         {
-            if (evid == m_activeEvidenceId.toStdString())
+            if (gen == m_switchGen
+                && evid == m_activeEvidenceId.toStdString())
             {
                 m_activeMediaInfo = info;
                 emit mediaInfoChanged();
@@ -822,6 +935,7 @@ void KFWShell::probeEvidenceMedia(const QString &evidenceId)
                 setupLivePlayback();   /* engine ready ??? start the live player */
             }
         }, Qt::QueuedConnection);
+        --m_probesRunning;
     });
 
     connect(worker, &QThread::finished, worker, &QThread::deleteLater);
@@ -984,8 +1098,14 @@ void KFWShell::onVlcFrame(int64_t tsMs, unsigned w, unsigned h,
     }
 
     if (m_detector != nullptr)
+    {
+        /* Reset requested by a seek on the GUI thread: apply it here, on the
+         * thread that owns the detector state, instead of racing it. */
+        if (m_detectorResetPending.exchange(false))
+            kfw_detect_reset(m_detector);
         kfw_detect_frame(m_detector, tsMs, w, h, bgra, pitch, lines,
                          detect_trampoline, this);
+    }
 
     {
         static bool dumped = false;
@@ -1154,6 +1274,11 @@ void KFWShell::setupLivePlayback()
     emit playbackChanged();
     emit positionChanged();
 
+    m_detectorResetPending = false;
+    m_trackRetries = 0;
+    kfw_player_set_volume(m_player, m_volume);
+    kfw_player_set_mute(m_player, m_muted ? 1 : 0);
+
     /* Live engine: start immediately so indicators run from t=0. */
     kfw_player_play(m_player);
     m_playPoll->start(40);
@@ -1197,6 +1322,7 @@ void KFWShell::teardownLivePlayback()
     m_positionMs = 0;
     m_durationMs = -1;
     m_rate       = 1.0;
+    clearTracks();
     if (!m_indicatorCounts.isEmpty())
     {
         m_indicatorCounts.clear();
@@ -1238,6 +1364,15 @@ void KFWShell::pollPlayback()
     }
     if (structural)
         emit playbackChanged();
+
+    /* The engine discovers audio/subtitle streams lazily after playback
+     * starts; poll a few times (about every 400 ms, for ~10 s) until known. */
+    if ((playing || st == KFW_PLAYER_PAUSED)
+        && m_audioTracks.size() <= 1 && m_trackRetries < 250)
+    {
+        if ((m_trackRetries++ % 10) == 0)
+            refreshTracks();
+    }
 }
 
 void KFWShell::playToggle()
@@ -1281,8 +1416,7 @@ void KFWShell::playerSeekMs(double ms)
         t = m_durationMs;
 
     kfw_player_seek_ms(m_player, static_cast<int64_t>(t));
-    if (m_detector != nullptr)
-        kfw_detect_reset(m_detector);   /* discontinuity: drop run state */
+    m_detectorResetPending = true;   /* discontinuity: drop run state */
 
     m_positionMs = t;
     emit positionChanged();
@@ -1311,6 +1445,388 @@ void KFWShell::playerSetRate(double rate)
     kfw_player_set_rate(m_player, static_cast<float>(rate));
     m_rate = kfw_player_rate(m_player);
     emit playbackChanged();
+}
+
+void KFWShell::clearTracks()
+{
+    const bool changed = !m_audioTracks.isEmpty() || !m_subtitleTracks.isEmpty()
+                         || m_audioTrackId != -1 || m_subtitleTrackId != -1;
+    m_audioTracks.clear();
+    m_subtitleTracks.clear();
+    m_audioTrackId    = -1;
+    m_subtitleTrackId = -1;
+    m_trackRetries    = 0;
+    if (changed)
+        emit tracksChanged();
+}
+
+static QVariantList track_list(const kfw_track_desc_t *buf, int n)
+{
+    QVariantList list;
+    for (int i = 0; i < n; ++i)
+    {
+        QVariantMap m;
+        m.insert(QStringLiteral("id"),   buf[i].id);
+        m.insert(QStringLiteral("name"), QString::fromUtf8(buf[i].name));
+        list.append(m);
+    }
+    return list;
+}
+
+void KFWShell::refreshTracks()
+{
+    if (m_player == nullptr)
+        return;
+
+    kfw_track_desc_t buf[32];
+    const QVariantList audio =
+        track_list(buf, kfw_player_audio_tracks(m_player, buf, 32));
+    const int audioId = kfw_player_audio_track(m_player);
+    const QVariantList subs =
+        track_list(buf, kfw_player_spu_tracks(m_player, buf, 32));
+    const int subId = kfw_player_spu_track(m_player);
+
+    if (audio != m_audioTracks || subs != m_subtitleTracks
+        || audioId != m_audioTrackId || subId != m_subtitleTrackId)
+    {
+        /* First time audio streams appear: (re)apply the examiner's volume,
+         * the engine ignores it until an audio output exists. */
+        if (m_audioTracks.isEmpty() && !audio.isEmpty())
+        {
+            kfw_player_set_volume(m_player, m_volume);
+            kfw_player_set_mute(m_player, m_muted ? 1 : 0);
+        }
+        m_audioTracks     = audio;
+        m_subtitleTracks  = subs;
+        m_audioTrackId    = audioId;
+        m_subtitleTrackId = subId;
+        emit tracksChanged();
+    }
+}
+
+static QString track_name(const QVariantList &list, int id)
+{
+    for (const QVariant &v : list)
+    {
+        const QVariantMap m = v.toMap();
+        if (m.value(QStringLiteral("id")).toInt() == id)
+            return m.value(QStringLiteral("name")).toString();
+    }
+    return QString::number(id);
+}
+
+void KFWShell::setAudioTrack(int trackId)
+{
+    if (m_player == nullptr)
+        return;
+    if (kfw_player_set_audio_track(m_player, trackId) != 0)
+    {
+        emit errorOccurred(QStringLiteral("Could not switch the audio track."));
+        return;
+    }
+    refreshTracks();
+    const QString name = track_name(m_audioTracks, trackId);
+    emit notice(QStringLiteral("Audio: %1").arg(name));
+
+    /* Examiner actions that change what is heard belong in the audit chain. */
+    if (s_db && !m_activeEvidenceId.isEmpty())
+    {
+        const QByteArray detail = QJsonDocument(QJsonObject{
+            { QStringLiteral("track_id"), trackId },
+            { QStringLiteral("track_name"), name } })
+            .toJson(QJsonDocument::Compact);
+        kfw_db_audit_append(s_db, m_examinerName.toUtf8().constData(),
+                            "playback.audio_track", "evidence",
+                            m_activeEvidenceId.toUtf8().constData(),
+                            detail.constData());
+        refreshAuditChain();
+    }
+}
+
+void KFWShell::setSubtitleTrack(int trackId)
+{
+    if (m_player == nullptr)
+        return;
+    if (kfw_player_set_spu_track(m_player, trackId) != 0)
+    {
+        emit errorOccurred(QStringLiteral("Could not switch the subtitle track."));
+        return;
+    }
+    refreshTracks();
+    emit notice(QStringLiteral("Subtitles: %1")
+                    .arg(track_name(m_subtitleTracks, trackId)));
+}
+
+void KFWShell::setVolume(int percent)
+{
+    percent = std::max(0, std::min(200, percent));
+    m_volume = percent;
+    if (m_player != nullptr)
+        kfw_player_set_volume(m_player, percent);
+    emit volumeChanged();
+}
+
+void KFWShell::toggleMute()
+{
+    m_muted = !m_muted;
+    if (m_player != nullptr)
+        kfw_player_set_mute(m_player, m_muted ? 1 : 0);
+    emit volumeChanged();
+}
+
+// ---- Verify all / search / tags / handover packages ------------------------------------
+
+static QString local_path(const QString &p)
+{
+    return p.startsWith(QStringLiteral("file:")) ? QUrl(p).toLocalFile() : p;
+}
+
+QString KFWShell::packagesDir()
+{
+    const QString dir = kfwDataDir() + QStringLiteral("/packages");
+    QDir().mkpath(dir);
+    return dir;
+}
+
+void KFWShell::verifyAllEvidence(const QString &caseId)
+{
+    if (!s_db)
+        return;
+    const QByteArray caseIdBytes  = caseId.toUtf8();
+    const QByteArray examinerBytes = m_examinerName.toUtf8();
+    const QString storeRoot = kfwDataDir() + QStringLiteral("/evidence");
+    const QByteArray storeBytes = storeRoot.toUtf8();
+
+    ++m_probesRunning;
+    QThread *worker = QThread::create([=]()
+    {
+        kfw_evidence_ctx_t ctx = { s_db, storeBytes.constData(),
+                                   examinerBytes.constData() };
+        kfw_db_evidence_t *arr = nullptr;
+        int n = 0;
+        int okCount = 0, bad = 0, other = 0;
+        if (kfw_db_evidence_list(s_db, caseIdBytes.constData(), &arr, &n) == 0)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                kfw_verify_status_t st = KFW_VERIFY_NOT_CHECKED;
+                if (kfw_evidence_reverify(&ctx, arr[i].evidence_id, &st) == 0)
+                {
+                    if (st == KFW_VERIFY_VERIFIED)      ++okCount;
+                    else if (st == KFW_VERIFY_MISMATCH) ++bad;
+                    else                                ++other;
+                }
+                else
+                    ++other;
+            }
+        }
+        free(arr);
+
+        QMetaObject::invokeMethod(this, [=]()
+        {
+            const QString summary = QStringLiteral(
+                "Verified %1 of %2 item(s)").arg(okCount).arg(n);
+            if (bad > 0 || other > 0)
+                emit errorOccurred(QStringLiteral(
+                    "%1. %2 changed since import, %3 missing or unreadable.")
+                    .arg(summary).arg(bad).arg(other));
+            else
+                emit notice(summary + QStringLiteral(" - all match their import hashes"));
+            if (caseId == m_activeCaseId)
+                reloadEvidence(caseId);
+            refreshAuditChain();
+        }, Qt::QueuedConnection);
+        --m_probesRunning;
+    });
+    connect(worker, &QThread::finished, worker, &QThread::deleteLater);
+    worker->start();
+}
+
+QVariantList KFWShell::search(const QString &caseId, const QString &query)
+{
+    QVariantList out;
+    if (!s_db)
+        return out;
+    kfw_db_hit_t *hits = nullptr;
+    int n = 0;
+    if (kfw_db_search(s_db, caseId.toUtf8().constData(),
+                      query.toUtf8().constData(), &hits, &n) == 0)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            QVariantMap m;
+            m.insert(QStringLiteral("kind"),       QString::fromUtf8(hits[i].kind));
+            m.insert(QStringLiteral("evidenceId"), QString::fromUtf8(hits[i].evidence_id));
+            m.insert(QStringLiteral("eventId"),    QString::fromUtf8(hits[i].event_id));
+            m.insert(QStringLiteral("tsMs"),       static_cast<double>(hits[i].ts_ms));
+            m.insert(QStringLiteral("title"),      QString::fromUtf8(hits[i].title));
+            m.insert(QStringLiteral("snippet"),    QString::fromUtf8(hits[i].snippet));
+            out.append(m);
+        }
+    }
+    free(hits);
+    return out;
+}
+
+bool KFWShell::addTag(const QString &itemType, const QString &itemId, const QString &tag)
+{
+    if (!s_db)
+        return false;
+    const bool ok = kfw_db_tag_apply(s_db, m_examinerName.toUtf8().constData(),
+                                     itemType.toUtf8().constData(),
+                                     itemId.toUtf8().constData(),
+                                     tag.toUtf8().constData()) == 0;
+    if (ok)
+    {
+        emit tagsChanged();
+        refreshAuditChain();
+    }
+    return ok;
+}
+
+bool KFWShell::removeTag(const QString &itemType, const QString &itemId, const QString &tag)
+{
+    if (!s_db)
+        return false;
+    const bool ok = kfw_db_tag_remove(s_db, m_examinerName.toUtf8().constData(),
+                                      itemType.toUtf8().constData(),
+                                      itemId.toUtf8().constData(),
+                                      tag.toUtf8().constData()) >= 0;
+    if (ok)
+    {
+        emit tagsChanged();
+        refreshAuditChain();
+    }
+    return ok;
+}
+
+QVariantList KFWShell::tagsFor(const QString &itemType, const QString &itemId)
+{
+    QVariantList out;
+    if (!s_db)
+        return out;
+    kfw_db_tag_t *t = nullptr;
+    int n = 0;
+    if (kfw_db_tag_list_for(s_db, itemType.toUtf8().constData(),
+                            itemId.toUtf8().constData(), &t, &n) == 0)
+        for (int i = 0; i < n; ++i)
+            out.append(QString::fromUtf8(t[i].name));
+    free(t);
+    return out;
+}
+
+QVariantList KFWShell::allTags()
+{
+    QVariantList out;
+    if (!s_db)
+        return out;
+    kfw_db_tag_t *t = nullptr;
+    int n = 0;
+    if (kfw_db_tag_list_all(s_db, &t, &n) == 0)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            QVariantMap m;
+            m.insert(QStringLiteral("name"),  QString::fromUtf8(t[i].name));
+            m.insert(QStringLiteral("count"), t[i].use_count);
+            out.append(m);
+        }
+    }
+    free(t);
+    return out;
+}
+
+void KFWShell::exportHandoverPackage(const QString &caseId, bool includeEvidence)
+{
+    if (!s_db)
+    {
+        emit errorOccurred(QStringLiteral("No case database open."));
+        return;
+    }
+    const QByteArray caseIdBytes   = caseId.toUtf8();
+    const QByteArray examinerBytes = m_examinerName.toUtf8();
+    const QByteArray outBytes      = packagesDir().toUtf8();
+
+    emit notice(QStringLiteral("Building handover package..."));
+    ++m_probesRunning;
+    QThread *worker = QThread::create([=]()
+    {
+        kfw_package_params_t p;
+        memset(&p, 0, sizeof(p));
+        p.db               = s_db;
+        p.case_id          = caseIdBytes.constData();
+        p.examiner         = examinerBytes.constData();
+        p.out_dir          = outBytes.constData();
+        p.tool_name        = "Kishan Forensic Workbench";
+        p.tool_version     = "0.1.0-alpha";
+        p.include_evidence = includeEvidence ? 1 : 0;
+
+        kfw_package_result_t r;
+        memset(&r, 0, sizeof(r));
+        const int rc = kfw_package_create(&p, &r);
+
+        QStringList warn;
+        if (r.n_evidence_missing > 0)
+            warn << QStringLiteral("%1 evidence file(s) missing from the store")
+                        .arg(r.n_evidence_missing);
+        if (r.n_evidence_mismatch > 0)
+            warn << QStringLiteral("%1 evidence file(s) no longer match their import hash")
+                        .arg(r.n_evidence_mismatch);
+        if (!r.report_ok)
+            warn << QStringLiteral("the report could not be generated");
+        const QString dir = QString::fromUtf8(r.package_dir);
+        const QString sha = QString::fromUtf8(r.manifest_sha256);
+        const QString summary = QStringLiteral("%1 files, %2 evidence item(s) copied")
+                                    .arg(r.n_files).arg(r.n_evidence_copied)
+                                + (warn.isEmpty() ? QString()
+                                   : QStringLiteral(". Warning: ") + warn.join(QStringLiteral("; ")));
+
+        QMetaObject::invokeMethod(this, [=]()
+        {
+            if (rc < 0)
+                emit errorOccurred(QStringLiteral(
+                    "Could not create the handover package (code %1).").arg(rc));
+            else
+            {
+                emit packageCreated(dir, sha, summary, rc == 1);
+                emit notice(QStringLiteral("Handover package created"));
+            }
+            refreshAuditChain();
+        }, Qt::QueuedConnection);
+        --m_probesRunning;
+    });
+    connect(worker, &QThread::finished, worker, &QThread::deleteLater);
+    worker->start();
+}
+
+void KFWShell::verifyHandoverPackage(const QString &folder)
+{
+    const QByteArray pathBytes = local_path(folder).toUtf8();
+    ++m_probesRunning;
+    QThread *worker = QThread::create([=]()
+    {
+        kfw_package_verify_result_t r;
+        memset(&r, 0, sizeof(r));
+        const int rc = kfw_package_verify(pathBytes.constData(), &r);
+
+        QVariantMap m;
+        m.insert(QStringLiteral("readable"),       rc >= 0);
+        m.insert(QStringLiteral("ok"),             rc == 0);
+        m.insert(QStringLiteral("manifestDigest"), r.manifest_digest);
+        m.insert(QStringLiteral("files"),          r.n_files);
+        m.insert(QStringLiteral("okCount"),        r.n_ok);
+        m.insert(QStringLiteral("mismatch"),       r.n_mismatch);
+        m.insert(QStringLiteral("missing"),        r.n_missing);
+        m.insert(QStringLiteral("extra"),          r.n_extra);
+        m.insert(QStringLiteral("manifestSha256"), QString::fromUtf8(r.manifest_sha256));
+        m.insert(QStringLiteral("firstProblem"),   QString::fromUtf8(r.first_problem));
+
+        QMetaObject::invokeMethod(this, [=]() { emit packageVerified(m); },
+                                  Qt::QueuedConnection);
+        --m_probesRunning;
+    });
+    connect(worker, &QThread::finished, worker, &QThread::deleteLater);
+    worker->start();
 }
 
 void KFWShell::attachVideoScreen(QObject *item)

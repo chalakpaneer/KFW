@@ -52,6 +52,7 @@ QVariant KFWEvidenceModel::data(const QModelIndex &index, int role) const
     case VerifyStatusRole: return r.verifyStatus;
     case ImportedRole:     return r.importedText;
     case HasMediaRole:     return r.hasMedia;
+    case DuplicateOfRole:  return r.duplicateOf;
     default:               return QVariant{};
     }
 }
@@ -71,6 +72,7 @@ QHash<int, QByteArray> KFWEvidenceModel::roleNames() const
         { VerifyStatusRole, "verifyStatus"  },
         { ImportedRole,     "importedText"  },
         { HasMediaRole,     "hasMedia"      },
+        { DuplicateOfRole,  "duplicateOf"   },
     };
 }
 
@@ -95,6 +97,7 @@ void KFWEvidenceModel::reload(const QVariantList &rows)
         r.verifyStatus  = m.value("verifyStatus").toString();
         r.importedText  = m.value("importedText").toString();
         r.hasMedia      = QFileInfo::exists(r.storedPath);
+        r.duplicateOf   = m.value("duplicateOf").toString();
         m_rows.push_back(std::move(r));
     }
 
@@ -121,6 +124,7 @@ QVariantMap KFWEvidenceModel::get(const QString &evidenceId) const
                 { "verifyStatus", r.verifyStatus },
                 { "importedText", r.importedText },
                 { "hasMedia",     r.hasMedia     },
+                { "duplicateOf",  r.duplicateOf  },
             };
         }
     }

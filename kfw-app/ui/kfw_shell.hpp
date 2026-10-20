@@ -27,6 +27,7 @@
 #ifndef KFW_SHELL_HPP
 #define KFW_SHELL_HPP
 
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <QImage>
@@ -36,6 +37,7 @@
 #include <QSize>
 #include <QString>
 #include <QUrl>
+#include <QVariantList>
 #include <QVariantMap>
 
 #include "models/kfw_case_model.hpp"
@@ -81,6 +83,14 @@ class KFWShell : public QObject
     Q_PROPERTY(QVariantMap liveIndicators  READ liveIndicators   NOTIFY indicatorsChanged)
     Q_PROPERTY(int        liveIndicatorTotal READ liveIndicatorTotal NOTIFY indicatorsChanged)
 
+    // ---- Audio / subtitle tracks and volume (live engine) ----------------------
+    Q_PROPERTY(QVariantList audioTracks    READ audioTracks    NOTIFY tracksChanged)
+    Q_PROPERTY(int          audioTrackId   READ audioTrackId   NOTIFY tracksChanged)
+    Q_PROPERTY(QVariantList subtitleTracks READ subtitleTracks NOTIFY tracksChanged)
+    Q_PROPERTY(int          subtitleTrackId READ subtitleTrackId NOTIFY tracksChanged)
+    Q_PROPERTY(int          volume         READ volume         NOTIFY volumeChanged)
+    Q_PROPERTY(bool         muted          READ muted          NOTIFY volumeChanged)
+
 public:
     explicit KFWShell(QObject *parent = nullptr);
     ~KFWShell() override;
@@ -122,6 +132,13 @@ public:
         return total;
     }
 
+    QVariantList audioTracks()     const { return m_audioTracks; }
+    int          audioTrackId()    const { return m_audioTrackId; }
+    QVariantList subtitleTracks()  const { return m_subtitleTracks; }
+    int          subtitleTrackId() const { return m_subtitleTrackId; }
+    int          volume()          const { return m_volume; }
+    bool         muted()           const { return m_muted; }
+
     /** Latest decoded frame (deep copy, thread-safe). Null if none. */
     QImage frameSnapshot() const;
 
@@ -138,11 +155,18 @@ public slots:
 
     // ---- Case management -----------------------------------------------------
     Q_INVOKABLE QString createCase(const QString &title, const QString &examiner);
+    Q_INVOKABLE QString createCaseEx(const QString &title, const QString &examiner,
+                                     const QString &caseNumber,
+                                     const QString &agency,
+                                     const QString &requester);
+    Q_INVOKABLE QVariantMap caseDetails(const QString &caseId);
+    Q_INVOKABLE bool saveCaseDetails(const QString &caseId, const QVariantMap &details);
     Q_INVOKABLE void setCaseStatus(const QString &caseId, const QString &status);
 
     // ---- Evidence -------------------------------------------------------------
     Q_INVOKABLE void importEvidence(const QString &caseId, const QString &filePath);
     Q_INVOKABLE void reverifyEvidence(const QString &evidenceId);
+    Q_INVOKABLE void verifyAllEvidence(const QString &caseId);
     Q_INVOKABLE void probeEvidenceMedia(const QString &evidenceId);
 
     // ---- Live playback engine (libVLC driven) ---------------------------------
@@ -152,6 +176,10 @@ public slots:
     Q_INVOKABLE void playerSeekMs(double ms);
     Q_INVOKABLE void playerStepMs(double delta);
     Q_INVOKABLE void playerSetRate(double rate);
+    Q_INVOKABLE void setAudioTrack(int trackId);
+    Q_INVOKABLE void setSubtitleTrack(int trackId);
+    Q_INVOKABLE void setVolume(int percent);
+    Q_INVOKABLE void toggleMute();
     Q_INVOKABLE void attachVideoScreen(QObject *item);
     Q_INVOKABLE void detachVideoScreen(QObject *item);
 
@@ -164,6 +192,16 @@ public slots:
     // ---- Reporting ---------------------------------------------------------------
     Q_INVOKABLE void generateReport(const QString &caseId, const QString &reportId,
                                      const QString &examinerSummary);
+
+    // ---- Search, tags, handover packages ------------------------------------------
+    Q_INVOKABLE QVariantList search(const QString &caseId, const QString &query);
+    Q_INVOKABLE bool addTag(const QString &itemType, const QString &itemId, const QString &tag);
+    Q_INVOKABLE bool removeTag(const QString &itemType, const QString &itemId, const QString &tag);
+    Q_INVOKABLE QVariantList tagsFor(const QString &itemType, const QString &itemId);
+    Q_INVOKABLE QVariantList allTags();
+    Q_INVOKABLE void exportHandoverPackage(const QString &caseId, bool includeEvidence);
+    Q_INVOKABLE void verifyHandoverPackage(const QString &folder);
+    Q_INVOKABLE QString packagesDir();
 
     // ---- Desktop integration ------------------------------------------------------- 
     Q_INVOKABLE void revealPath(const QString &path);
@@ -179,6 +217,12 @@ signals:
     void playbackChanged();
     void positionChanged();
     void indicatorsChanged();
+    void tracksChanged();
+    void tagsChanged();
+    void packageCreated(const QString &path, const QString &manifestSha256,
+                        const QString &summary, bool hasWarnings);
+    void packageVerified(const QVariantMap &result);
+    void volumeChanged();
 
     void caseCreated(const QString &caseId);
     void evidenceImported(const QString &evidenceId, const QString &verifyStatus,
@@ -206,6 +250,8 @@ private:
     void                  teardownLivePlayback();
     void                  pollPlayback();
     void                  pumpFrame();
+    void                  refreshTracks();
+    void                  clearTracks();
     void                  recordDetection(int64_t tsMs, const QString &kind,
                                           const QString &detail);
 
@@ -245,7 +291,7 @@ private:
     QTimer              *m_playPoll    = nullptr;
 
     bool                m_playing    = false;
-    bool                m_hasFrame   = false;
+    std::atomic<bool>   m_hasFrame   { false };   /* written on decoder thread */
     qlonglong           m_positionMs = 0;
     qlonglong           m_durationMs = -1;
     double              m_rate       = 1.0;
@@ -262,6 +308,21 @@ private:
     bool                m_pipelineTrace = false;
 
     QVariantMap         m_indicatorCounts;
+
+    /* Evidence-switch safety: every switch bumps the generation so late
+     * probe results / queued callbacks from a previous item are discarded. */
+    int                 m_switchGen = 0;
+    std::atomic<int>    m_probesRunning { 0 };
+    std::atomic<bool>   m_detectorResetPending { false };
+
+    /* Audio / subtitle track state (populated once playback starts). */
+    QVariantList        m_audioTracks;
+    QVariantList        m_subtitleTracks;
+    int                 m_audioTrackId    = -1;
+    int                 m_subtitleTrackId = -1;
+    int                 m_trackRetries    = 0;
+    int                 m_volume          = 100;
+    bool                m_muted           = false;
 };
 
 #endif // KFW_SHELL_HPP

@@ -100,6 +100,8 @@ add_library(kfw_forensic STATIC
     evidence/kfw_evidence.c
     timeline/kfw_timeline.c
     reporting/kfw_report.c
+    util/kfw_util.c
+    export/kfw_package.c
     media/kfw_media.c
     detect/kfw_detect.c
 )
@@ -165,6 +167,8 @@ qt_add_qml_module(kfw
         ui/qml/KFWField.qml
         ui/qml/KFWIconButton.qml
         ui/qml/KFWAvatarBadge.qml
+        ui/qml/KFWSelect.qml
+        ui/qml/KFWCaseCenter.qml
     RESOURCES
         ui/qml/icons/logo.svg
         ui/qml/icons/dashboard.svg

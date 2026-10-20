@@ -256,13 +256,12 @@ Window {
                     }
                 }
 
-                // Reports hint (v0.2 placeholder)
+                // Case & Reports centre
                 Rectangle {
                     width: parent.width
                     height: 40
                     radius: theme.rMd
-                    color: "transparent"
-                    opacity: 0.45
+                    color: navHoverR.hovered ? theme.card : "transparent"
 
                     Row {
                         anchors.fill: parent
@@ -283,21 +282,28 @@ Window {
                             width: 17; height: 17
                             source: navReportIcon
                             colorization: 1
-                            colorizationColor: theme.textLow
+                            colorizationColor: theme.textMid
                         }
 
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "Reports            v0.2"
+                            text: "Case & Reports"
                             font { pixelSize: 12; family: theme.fontFamily }
-                            color: theme.textLow
+                            color: theme.textMid
                         }
                     }
 
-                    ToolTip.visible: navHoverR.hovered
-                    ToolTip.text: "Report generation lives in the workstation toolbar"
-                    ToolTip.delay: 350
                     HoverHandler { id: navHoverR }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (kfwShell.activeCaseId.length > 0)
+                                caseCenter.openFor(kfwShell.activeCaseId)
+                            else
+                                toast.show("Open a case first", 1)
+                        }
+                    }
                 }
             }
         }
@@ -533,6 +539,12 @@ Window {
     }
 
     // -- Toast ----------------------------------------------------------------
+    KFWCaseCenter {
+        id: caseCenter
+        anchors.fill: parent
+        z: 40
+    }
+
     KFWToast { id: toast }
 
     Connections {
@@ -545,6 +557,8 @@ Window {
             else if (scr === "Dashboard" && stack.depth > 1)
                 stack.pop()
         }
+
+        function onCaseCreated(caseId) { kfwShell.openCase(caseId) }
 
         function onNotice(msg)    { toast.show(msg, toast.infoT) }
         function onErrorOccurred(msg) { toast.show(msg, toast.errorT) }
@@ -615,6 +629,24 @@ Window {
                 text: kfwShell.examinerName
             }
 
+            KFWField {
+                id: caseNumberField
+                labelText: "CASE / FIR NUMBER (OPTIONAL)"
+                placeholder: "Agency reference number"
+            }
+
+            KFWField {
+                id: agencyField
+                labelText: "AGENCY (OPTIONAL)"
+                placeholder: "Unit or organisation"
+            }
+
+            KFWField {
+                id: requesterField
+                labelText: "REQUESTED BY (OPTIONAL)"
+                placeholder: "Requesting officer or client"
+            }
+
             Text {
                 visible: caseTitleField.text.trim().length > 0
                 text: "A case ID (KFW-YYYY-NNN) will be assigned automatically."
@@ -642,9 +674,15 @@ Window {
                         newCaseDialog.submitted = true
                         if (caseTitleField.text.trim().length === 0)
                             return
-                        kfwShell.createCase(caseTitleField.text.trim(),
-                                            examinerField.text.trim())
+                        kfwShell.createCaseEx(caseTitleField.text.trim(),
+                                              examinerField.text.trim(),
+                                              caseNumberField.text,
+                                              agencyField.text,
+                                              requesterField.text)
                         caseTitleField.text = ""
+                        caseNumberField.text = ""
+                        agencyField.text = ""
+                        requesterField.text = ""
                         newCaseDialog.submitted = false
                         newCaseDialog.close()
                     }
@@ -656,6 +694,9 @@ Window {
         onOpened: {
             newCaseDialog.submitted = false
             caseTitleField.text = ""
+            caseNumberField.text = ""
+            agencyField.text = ""
+            requesterField.text = ""
             examinerField.text = Qt.binding(function() { return kfwShell.examinerName })
         }
     }

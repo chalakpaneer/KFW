@@ -251,7 +251,7 @@ static int write_html_report(FILE *f,
         ".meta-label{font-size:10px;font-weight:700;color:var(--lo);letter-spacing:.8px;"
         "text-transform:uppercase;margin-bottom:4px;}\n"
         ".meta-value{font-size:14px;color:var(--hi);}\n"
-        "table{width:100%;border-collapse:collapse;margin-bottom:24px;}\n"
+        "table{width:100%%;border-collapse:collapse;margin-bottom:24px;}\n"
         "th{background:var(--panel);color:var(--lo);font-size:10px;font-weight:700;"
         "letter-spacing:.8px;text-transform:uppercase;padding:8px 12px;text-align:left;"
         "border:1px solid var(--border);}\n"
@@ -369,7 +369,7 @@ static int write_html_report(FILE *f,
         for (int i = 0; i < evt_count; ++i)
         {
             kfw_db_event_t *ev = &evts[i];
-            char ts_str[16];
+            char ts_str[48];
             int64_t ms = ev->ts_ms;
             snprintf(ts_str, sizeof(ts_str), "%02lld:%02lld:%02lld.%03lld",
                      (long long)(ms / 3600000),

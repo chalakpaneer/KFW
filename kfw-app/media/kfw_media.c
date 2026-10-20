@@ -28,6 +28,7 @@
 #include <vlc/vlc.h>
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,6 +77,60 @@ static void kfw_native_path(const char *in, char *out, size_t cap)
     snprintf(out, cap, "%s", in);
 }
 #endif
+
+/* ---- Shared libVLC instances -------------------------------------------------
+ * Creating and releasing a libVLC instance on every evidence switch is slow
+ * and, on libVLC 3.x for Windows, racy: the probe worker thread called
+ * libvlc_new() while the GUI thread was inside libvlc_release(), which crashed
+ * the process when the examiner switched between evidence items.  Instances
+ * are now created once (lazily, under a lock) and live until
+ * kfw_media_shutdown().  Probing (headless, no audio) and live playback need
+ * different options, so each has its own long-lived instance. */
+static atomic_flag g_vlc_lock = ATOMIC_FLAG_INIT;
+static libvlc_instance_t *g_probe_inst  = NULL;
+static libvlc_instance_t *g_player_inst = NULL;
+
+static void kfw_vlc_lock(void)
+{
+    while (atomic_flag_test_and_set(&g_vlc_lock))
+        kfw_sleep_ms(1);
+}
+
+static void kfw_vlc_unlock(void)
+{
+    atomic_flag_clear(&g_vlc_lock);
+}
+
+static libvlc_instance_t *kfw_vlc_shared(libvlc_instance_t **slot,
+                                         int argc, const char *const *argv)
+{
+    kfw_vlc_lock();
+    if (*slot == NULL)
+    {
+        *slot = libvlc_new(argc, argv);
+        if (*slot != NULL)
+            kfw_vlc_log_setup(*slot);
+    }
+    libvlc_instance_t *inst = *slot;
+    kfw_vlc_unlock();
+    return inst;
+}
+
+void kfw_media_shutdown(void)
+{
+    kfw_vlc_lock();
+    if (g_player_inst != NULL)
+    {
+        libvlc_release(g_player_inst);
+        g_player_inst = NULL;
+    }
+    if (g_probe_inst != NULL)
+    {
+        libvlc_release(g_probe_inst);
+        g_probe_inst = NULL;
+    }
+    kfw_vlc_unlock();
+}
 
 static libvlc_media_t *kfw_media_from_path(libvlc_instance_t *inst,
                                            const char *path)
@@ -241,20 +296,19 @@ kfw_media_adapter_t *kfw_media_open(const char *path)
 
     /* Headless, no embedded video window, no audio outputs. */
     const char *argv[] = { "--no-audio", "--vout=dummy", "--network-caching=0" };
-    a->inst = libvlc_new((int)(sizeof(argv) / sizeof(argv[0])), argv);
+    a->inst = kfw_vlc_shared(&g_probe_inst,
+                             (int)(sizeof(argv) / sizeof(argv[0])), argv);
     if (a->inst == NULL)
     {
         fprintf(stderr, "kfw_media_open: libvlc_new failed\n");
         free(a);
         return NULL;
     }
-    kfw_vlc_log_setup(a->inst);
 
     a->media = kfw_media_from_path(a->inst, path);
     if (a->media == NULL)
     {
         fprintf(stderr, "kfw_media_open: media_new_path failed\n");
-        libvlc_release(a->inst);
         free(a);
         return NULL;
     }
@@ -270,8 +324,7 @@ void kfw_media_close(kfw_media_adapter_t *a)
         return;
     if (a->media != NULL)
         libvlc_media_release(a->media);
-    if (a->inst != NULL)
-        libvlc_release(a->inst);
+    /* a->inst is the shared probe instance - released in kfw_media_shutdown(). */
     kfw_media_info_clear(&a->info);
     free(a);
 }
@@ -476,18 +529,16 @@ kfw_player_t *kfw_player_create(const char *path,
     argv[argc++] = "--network-caching=0";
     if (getenv("KFW_VLC_VERBOSE") != NULL)
         argv[argc++] = "--verbose=2";
-    p->inst = libvlc_new(argc, argv);
+    p->inst = kfw_vlc_shared(&g_player_inst, argc, argv);
     if (p->inst == NULL)
     {
         free(p);
         return NULL;
     }
-    kfw_vlc_log_setup(p->inst);
 
     p->media = kfw_media_from_path(p->inst, path);
     if (p->media == NULL)
     {
-        libvlc_release(p->inst);
         free(p);
         return NULL;
     }
@@ -497,7 +548,6 @@ kfw_player_t *kfw_player_create(const char *path,
     {
         libvlc_media_release(p->media);
         p->media = NULL;
-        libvlc_release(p->inst);
         free(p);
         return NULL;
     }
@@ -520,8 +570,7 @@ void kfw_player_destroy(kfw_player_t *p)
     }
     if (p->media != NULL)
         libvlc_media_release(p->media);
-    if (p->inst != NULL)
-        libvlc_release(p->inst);
+    /* p->inst is the shared player instance - released in kfw_media_shutdown(). */
     for (unsigned i = 0; i < 2; ++i)
         free(p->buf[i]);
     free(p);
@@ -599,4 +648,97 @@ unsigned kfw_player_width(const kfw_player_t *p)
 unsigned kfw_player_height(const kfw_player_t *p)
 {
     return p == NULL ? 0 : p->h;
+}
+
+/* ---- Audio / subtitle tracks and volume ------------------------------------ */
+
+static int copy_track_list(libvlc_track_description_t *head,
+                           kfw_track_desc_t *out, int max)
+{
+    int n = 0;
+    for (libvlc_track_description_t *d = head; d != NULL && n < max;
+         d = d->p_next)
+    {
+        out[n].id = d->i_id;
+        snprintf(out[n].name, sizeof(out[n].name), "%s",
+                 d->psz_name != NULL ? d->psz_name : "");
+        n++;
+    }
+    if (head != NULL)
+        libvlc_track_description_list_release(head);
+    return n;
+}
+
+int kfw_player_audio_tracks(kfw_player_t *p, kfw_track_desc_t *out, int max)
+{
+    if (p == NULL || p->mp == NULL || out == NULL || max <= 0)
+        return 0;
+    return copy_track_list(libvlc_audio_get_track_description(p->mp),
+                           out, max);
+}
+
+int kfw_player_audio_track(kfw_player_t *p)
+{
+    if (p == NULL || p->mp == NULL)
+        return -1;
+    return libvlc_audio_get_track(p->mp);
+}
+
+int kfw_player_set_audio_track(kfw_player_t *p, int id)
+{
+    if (p == NULL || p->mp == NULL)
+        return -1;
+    return libvlc_audio_set_track(p->mp, id) == 0 ? 0 : -1;
+}
+
+int kfw_player_spu_tracks(kfw_player_t *p, kfw_track_desc_t *out, int max)
+{
+    if (p == NULL || p->mp == NULL || out == NULL || max <= 0)
+        return 0;
+    return copy_track_list(libvlc_video_get_spu_description(p->mp),
+                           out, max);
+}
+
+int kfw_player_spu_track(kfw_player_t *p)
+{
+    if (p == NULL || p->mp == NULL)
+        return -1;
+    return libvlc_video_get_spu(p->mp);
+}
+
+int kfw_player_set_spu_track(kfw_player_t *p, int id)
+{
+    if (p == NULL || p->mp == NULL)
+        return -1;
+    return libvlc_video_set_spu(p->mp, id) == 0 ? 0 : -1;
+}
+
+void kfw_player_set_volume(kfw_player_t *p, int percent)
+{
+    if (p == NULL || p->mp == NULL)
+        return;
+    if (percent < 0)   percent = 0;
+    if (percent > 200) percent = 200;
+    libvlc_audio_set_volume(p->mp, percent);
+}
+
+int kfw_player_volume(kfw_player_t *p)
+{
+    if (p == NULL || p->mp == NULL)
+        return 0;
+    int v = libvlc_audio_get_volume(p->mp);
+    return v < 0 ? 0 : v;
+}
+
+void kfw_player_set_mute(kfw_player_t *p, int mute)
+{
+    if (p != NULL && p->mp != NULL)
+        libvlc_audio_set_mute(p->mp, mute ? 1 : 0);
+}
+
+int kfw_player_muted(kfw_player_t *p)
+{
+    if (p == NULL || p->mp == NULL)
+        return 0;
+    return libvlc_audio_get_mute(p->mp) > 0 ? 1 : 0;
 }

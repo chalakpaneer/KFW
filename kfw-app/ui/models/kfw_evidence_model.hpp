@@ -37,6 +37,7 @@ struct KFWEvidence
     qint64  importedUtc = 0;
     QString importedText;    // formatted display date
     bool    hasMedia    = false; // stored file exists
+    QString duplicateOf;     // evidence id with identical SHA-256, or ""
 };
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,7 @@ public:
         VerifyStatusRole,
         ImportedRole,
         HasMediaRole,
+        DuplicateOfRole,
     };
     Q_ENUM(Roles)
 

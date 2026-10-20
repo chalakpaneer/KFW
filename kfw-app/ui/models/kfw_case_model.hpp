@@ -52,6 +52,13 @@ class KFWCaseModel : public QAbstractListModel
     /** NOTIFIABLE count for QML bindings (rowCount() is not trackable). */
     Q_PROPERTY(int count READ count NOTIFY countChanged)
 
+    /** Dashboard stats. Notifiable so stat cards refresh when cases change
+     *  (plain Q_INVOKABLE calls are evaluated once and never re-run). */
+    Q_PROPERTY(int totalCases   READ totalCases   NOTIFY statsChanged)
+    Q_PROPERTY(int openCases    READ openCases    NOTIFY statsChanged)
+    Q_PROPERTY(int pendingTotal READ pendingTotal NOTIFY statsChanged)
+    Q_PROPERTY(int evidenceTotal READ evidenceTotal NOTIFY statsChanged)
+
 public:
     enum Roles {
         CaseIdRole = Qt::UserRole,
@@ -79,10 +86,10 @@ public:
     /** Update the status of a single case (database is updated by the shell). */
     Q_INVOKABLE void setStatus(const QString &caseId, const QString &status);
 
-    Q_INVOKABLE int  totalCases()     const;
-    Q_INVOKABLE int  openCases()      const;
-    Q_INVOKABLE int  pendingTotal()   const;
-    Q_INVOKABLE int  evidenceTotal()  const;
+    int totalCases() const;
+    int openCases() const;
+    int pendingTotal() const;
+    int evidenceTotal() const;
 
     int indexOfCase(const QString &caseId) const;
 
@@ -90,6 +97,7 @@ public:
 
 signals:
     void countChanged();
+    void statsChanged();
 
 private:
     std::vector<KFWCase> m_cases;

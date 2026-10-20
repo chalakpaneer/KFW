@@ -310,6 +310,7 @@ Rectangle {
                                 required property string sizeText
                                 required property string verifyStatus
                                 required property bool   hasMedia
+                                required property string duplicateOf
 
                                 readonly property bool active:
                                     evId === kfwShell.activeEvidenceId
@@ -372,6 +373,27 @@ Rectangle {
                                             width: 62
                                             status: evRow.verifyStatus
                                             compact: true
+                                        }
+                                        Rectangle {
+                                            visible: evRow.duplicateOf.length > 0
+                                            height: 16
+                                            width: dupText.implicitWidth + 12
+                                            radius: 8
+                                            color: "transparent"
+                                            border.width: 1
+                                            border.color: theme.warn
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            Text {
+                                                id: dupText
+                                                anchors.centerIn: parent
+                                                text: "DUP of " + evRow.duplicateOf
+                                                font { pixelSize: 9; family: theme.fontMono }
+                                                color: theme.textMid
+                                            }
+                                            ToolTip.visible: dupHover.hovered
+                                            ToolTip.text: "Byte-identical to " + evRow.duplicateOf
+                                                          + " (same SHA-256)"
+                                            HoverHandler { id: dupHover }
                                         }
                                     }
                                 }
@@ -583,7 +605,7 @@ Rectangle {
                 Rectangle {
                     id: controlsBar
                     width: parent.width
-                    height: 130
+                    height: 172
                     color: theme.bg
                     border.width: 1
                     border.color: theme.border
@@ -823,6 +845,108 @@ Rectangle {
                                 onClicked: kfwShell.saveEvidenceNotes(
                                     kfwShell.activeEvidenceId,
                                     notesArea.text)
+                            }
+                        }
+
+                        // Audio language / subtitles / volume
+                        Row {
+                            spacing: 8
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            enabled: hasMedia
+
+                            Text {
+                                text: "AUDIO"
+                                anchors.verticalCenter: parent.verticalCenter
+                                font { pixelSize: 9; bold: true; letterSpacing: 0.7
+                                       family: theme.fontFamily }
+                                color: theme.textLow
+                            }
+                            KFWSelect {
+                                width: 230
+                                anchors.verticalCenter: parent.verticalCenter
+                                model: kfwShell.audioTracks
+                                currentId: kfwShell.audioTrackId
+                                emptyText: "No audio track"
+                                enabled: kfwShell.audioTracks.length > 1
+                                onPicked: (id) => kfwShell.setAudioTrack(id)
+                            }
+
+                            Text {
+                                text: "SUBTITLES"
+                                anchors.verticalCenter: parent.verticalCenter
+                                font { pixelSize: 9; bold: true; letterSpacing: 0.7
+                                       family: theme.fontFamily }
+                                color: theme.textLow
+                            }
+                            KFWSelect {
+                                width: 170
+                                anchors.verticalCenter: parent.verticalCenter
+                                model: kfwShell.subtitleTracks
+                                currentId: kfwShell.subtitleTrackId
+                                emptyText: "None in file"
+                                enabled: kfwShell.subtitleTracks.length > 1
+                                onPicked: (id) => kfwShell.setSubtitleTrack(id)
+                            }
+
+                            Rectangle {
+                                width: 1; height: 22
+                                color: theme.border
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            KFWButton {
+                                height: 28
+                                label: kfwShell.muted ? "Unmute" : "Mute"
+                                outline: true
+                                anchors.verticalCenter: parent.verticalCenter
+                                onClicked: kfwShell.toggleMute()
+                            }
+                            Slider {
+                                id: volumeSlider
+                                width: 110
+                                anchors.verticalCenter: parent.verticalCenter
+                                from: 0
+                                to: 200
+                                stepSize: 5
+                                value: kfwShell.volume
+                                opacity: kfwShell.muted ? 0.4 : 1.0
+                                onMoved: kfwShell.setVolume(Math.round(value))
+
+                                background: Rectangle {
+                                    x: volumeSlider.leftPadding
+                                    y: volumeSlider.topPadding
+                                       + volumeSlider.availableHeight / 2 - height / 2
+                                    width: volumeSlider.availableWidth
+                                    height: 4
+                                    radius: 2
+                                    color: theme.card
+                                    border.width: 1
+                                    border.color: theme.border
+                                    Rectangle {
+                                        width: volumeSlider.visualPosition * parent.width
+                                        height: parent.height
+                                        radius: parent.radius
+                                        color: theme.accent
+                                    }
+                                }
+                                handle: Rectangle {
+                                    x: volumeSlider.leftPadding
+                                       + volumeSlider.visualPosition
+                                       * (volumeSlider.availableWidth - width)
+                                    y: volumeSlider.topPadding
+                                       + volumeSlider.availableHeight / 2 - height / 2
+                                    width: 12; height: 12; radius: 6
+                                    color: theme.accent
+                                    border.width: 2
+                                    border.color: theme.bg
+                                }
+                            }
+                            Text {
+                                text: kfwShell.volume + "%"
+                                width: 36
+                                anchors.verticalCenter: parent.verticalCenter
+                                font { pixelSize: 10; family: theme.fontMono }
+                                color: theme.textMid
                             }
                         }
                     }

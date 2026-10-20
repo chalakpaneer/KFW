@@ -35,12 +35,12 @@ int main(void)
           strcmp(hex, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0") == 0);
 
     /* streaming file hash must equal one-shot hash */
-    FILE *f = fopen("/tmp/kfw_sha_test.bin", "wb");
+    FILE *f = fopen("kfw_sha_test.bin", "wb");
     fwrite(mil, 1, 1000000, f); fclose(f);
     char hex2[KFW_SHA256_HEX + 1]; int64_t n = 0;
-    CHECK("file hash == buffer hash", kfw_sha256_file("/tmp/kfw_sha_test.bin", hex2, &n) == 0
+    CHECK("file hash == buffer hash", kfw_sha256_file("kfw_sha_test.bin", hex2, &n) == 0
           && n == 1000000 && strcmp(hex, hex2) == 0);
-    remove("/tmp/kfw_sha_test.bin");
+    remove("kfw_sha_test.bin");
     free(mil);
 
     printf("\n%d/%d passed\n", ok, run);

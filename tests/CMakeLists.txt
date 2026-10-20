@@ -82,14 +82,19 @@ target_link_libraries(test_detect PRIVATE kfw_forensic)
 kfw_test_runtime(test_detect)
 add_test(NAME detect COMMAND test_detect)
 
+# ── SHA-256 known-answer vectors (FIPS 180-4) — portable, Windows included ----
+add_executable(test_sha256_vectors integrity/test_sha256_vectors.c)
+target_include_directories(test_sha256_vectors PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../kfw-app")
+target_link_libraries(test_sha256_vectors PRIVATE kfw_forensic)
+kfw_test_runtime(test_sha256_vectors)
+add_test(NAME sha256_vectors COMMAND test_sha256_vectors WORKING_DIRECTORY
+    "${CMAKE_CURRENT_BINARY_DIR}")
+
 # ── v2 forensic services: migration, duplicates, tags, search, custody, packages
 # Uses POSIX helpers (sleep, system) so it is built on non-Windows hosts only;
 # run it on Linux/CI with tests/run_linux.sh.
 if(NOT WIN32)
-    add_executable(test_sha256_vectors integrity/test_sha256_vectors.c)
-    target_link_libraries(test_sha256_vectors PRIVATE kfw_forensic)
-    add_test(NAME sha256_vectors COMMAND test_sha256_vectors)
-
     add_executable(test_v2 v2/test_v2.c)
     target_link_libraries(test_v2 PRIVATE kfw_forensic)
     add_test(NAME v2_services COMMAND test_v2)

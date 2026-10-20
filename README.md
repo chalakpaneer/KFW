@@ -44,12 +44,14 @@ KFW/
 │   ├── media/              Media adapter over libVLC
 │   ├── timeline/           Event markers and timestamped observations
 │   ├── audit/              Audit event records
-│   ├── reporting/          JSON manifests and HTML/PDF reports
-│   ├── detect/             Anomaly detectors (black/freeze/flicker/cut)
-│   ├── ui/                 Qt Quick (QML) forensic workspace UI
-│   └── tools/              Icon generator, QA assets
-├── tests/                  Test suites (integrity, playback, reports, detect)
-├── docs/                   Architecture, threat model, validation plan
+│   ├── reporting/           JSON manifests and HTML/PDF reports
+│   ├── export/              Handover package creation and verification
+│   ├── util/                Portable C helpers (JSON/CSV escaping, paths)
+│   ├── detect/              Anomaly detectors (black/freeze/flicker/cut)
+│   ├── ui/                  Qt Quick (QML) forensic workspace UI
+│   └── tools/               Icon generator, QA assets
+├── tests/                   Test suites (integrity, playback, reports, detect, v2)
+├── docs/                   Architecture (v1 + v2), threat model, validation plan
 ├── packaging/              Inno Setup installer script
 ├── third_party/            Vendored libVLC 3.0.23 SDK (gitignored — see below)
 ├── .gitignore
@@ -82,7 +84,10 @@ forensic product *around* VLC rather than modifying it.
      (SQLite)        (originals/exports)   (events/verification)
 ```
 
-Full details: [`docs/architecture.md`](docs/architecture.md).
+Full details: [`docs/architecture.md`](docs/architecture.md). The v2 upgrade
+plan — case particulars, search, handover packages, analyzer host, face
+detection with review and redaction export — is in
+[`docs/architecture-v2.md`](docs/architecture-v2.md).
 
 ---
 
@@ -101,6 +106,27 @@ Full details: [`docs/architecture.md`](docs/architecture.md).
 - [x] Generate a case manifest and initial investigation report
 - [x] Log evidence imports, exports, and verification events
 
+### New in this update — v2 groundwork
+
+Delivered ahead of the 0.2 release plan in `docs/architecture-v2.md`:
+
+- **Case particulars** — case / FIR number, agency, requested-by, incident
+  date, location and description stored with the case (schema v2, with an
+  in-place upgrade of existing v1 databases; every edit is audited)
+- **Case & Reports centre** — edit particulars, verify all evidence in one
+  pass, and generate a fresh report from a single window
+- **Handover packages** — a self-describing folder with the evidence (or a
+  metadata-only copy), a freshly generated report, the chain of custody as
+  CSV, the timeline as CSV and a SHA-256 manifest of every file; the
+  recipient can **verify** the package to prove nothing was altered in
+  transit. The manifest SHA-256 should travel through a second channel
+- **Duplicate detection** — an import whose SHA-256 already exists in any
+  case is flagged as a duplicate of the earlier item on the evidence card
+- **Case-wide search** — evidence names and hashes, timeline labels and
+  bodies, notes and tags, with one-click navigation to the hit
+- **SHA-256 known-answer tests** — FIPS 180-4 vectors added to the test
+  suite, enabled on Windows and Linux/CI
+
 ### Release 2 — Investigation tools
 
 - [ ] Multi-camera timeline correlation
@@ -114,7 +140,9 @@ Full details: [`docs/architecture.md`](docs/architecture.md).
 
 Progress beyond Release 1: automatic anomaly detection (black, freeze, flicker,
 and cut indicators with cooldown-based event recording) is implemented and
-covered by the `detect` test suite.
+covered by the `detect` test suite. The case particulars, duplicate detection,
+verify-all, case-wide search and handover packages above are the first slice of
+the v2 architecture.
 
 ### Release 3 — Advanced analysis
 
@@ -159,7 +187,11 @@ cmake --build kfw-build --target test   # or: ctest --test-dir kfw-build
 ```
 
 The build produces `KishanForensicWorkbench.exe`; a post-build step copies the
-Qt and libVLC runtime DLLs next to the exe. For distribution, see
+Qt and libVLC runtime DLLs next to the exe. `ctest --test-dir kfw-build` runs
+five suites — integrity, playback, reports, detect and SHA-256 known-answer
+vectors. The v2 service tests (schema migration, duplicate detection,
+tags/search, chain of custody, handover packages) are POSIX-only and run on
+Linux/CI with `tests/run_linux.sh`. For distribution, see
 `packaging/kfw-installer.iss` (Inno Setup) for the installer and the portable
 zip layout described in `docs/architecture.md`.
 
